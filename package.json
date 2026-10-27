@@ -14,6 +14,14 @@
   ],
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/enncoded/pi-block-proxy-artifacts.git"
+  },
+  "homepage": "https://github.com/enncoded/pi-block-proxy-artifacts#readme",
+  "bugs": {
+    "url": "https://github.com/enncoded/pi-block-proxy-artifacts/issues"
+  },
   "pi": {
     "extensions": ["./extensions/block-proxy-artifacts.ts"]
   },
