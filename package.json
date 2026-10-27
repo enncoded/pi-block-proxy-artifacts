@@ -1,0 +1,40 @@
+{
+  "name": "pi-block-proxy-artifacts",
+  "version": "0.1.0",
+  "description": "Pi extension that hard-blocks hallucinated file-proxy artifact URLs and the cloud metadata surface before any tool dials out",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "hallucination",
+    "ssrf",
+    "privacy",
+    "qwen",
+    "aliyuncs"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions/block-proxy-artifacts.ts"]
+  },
+  "files": [
+    "extensions/block-proxy-artifacts.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@types/node": "^26.6.5",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
