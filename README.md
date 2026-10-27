@@ -1,7 +1,8 @@
 # block-proxy-artifacts for Pi
 
 A [Pi](https://github.com/earendil-works/pi) extension that blocks hallucinated file-proxy artifact
-URLs, and the cloud instance-metadata surface, before any tool dials out. A blocked call never executes.
+URLs before any tool dials out. A blocked call never executes. This is a Pi port of the
+OpenCode plugin https://github.com/wtogami/qwen-block-proxy-artifacts.
 
 ## The behavior it stops
 
@@ -11,37 +12,48 @@ Some models fabricate signed Aliyun OSS "file proxy" links and hand them to a fe
 https://routify-file-proxy-sg.oss-ap-southeast-1.aliyuncs.com/proxy_temp_file/production/<date>/trace_<hex>/requestId_<hex>/<hash>?Expires=…&OSSAccessKeyId=…&Signature=…
 ```
 
-Nobody configured that host. The shape belongs to a cheap API-relay middlebox substituting a link for an
-oversized tool output, and the model remembered it from pretraining. The real service answers `403`, so
-the link can never be fetched, and every attempt:
+Nobody configured that host, it was memorized from model training. Even though the server answers `403` for
+a made-up link, every attempt:
 
-- burns an agent step, plus a retry if the model does not take the hint;
-- sends the URL, this machine's IP and a timestamp to a third party;
-- leaves roughly 200 tokens of call-and-error junk in the context, which every later step re-reads.
+- burns an agent step, plus a retry if the model does not take the hint
+- sends the URL, this machine's IP, a timestamp, plus whatever else the model decides to include in the URL to a third party (perhaps API tokens as parameters)
+- leaves roughly 200 tokens of call-and-error junk in the context, which every later step re-reads
 
-Small Qwen 3.8 Flash builds do it, and the failure class is not model-specific: anything that has
-memorized the signed-URL schema can emit it. A model in that state will equally reach for
-`169.254.169.254`, the link-local metadata address that hands out the machine's temporary cloud
-credentials.
+This was first found in Qwen 3.8 Flash Next, but the failure class is not model-specific: anything that has
+memorized the signed-URL schema can emit it. And this type of error can happen with any URL a model is trained on.
+
+Reporting on this issue:
+* https://cohere.com/blog/concerning-behaviour-popular-open-weight-ai-model
+* https://www.theregister.com/ai-and-ml/2026/10/26/alibabas-qwen-ai-caught-trying-to-contact-server-in-china/5305561 
 
 ## What it does
 
-On every `tool_call` the extension scans the call arguments (strings, array items, nested object values
-and keys, 6 container levels) against four rules and returns `{ block: true, reason }`:
+On every network-capable tool call the extension scans the call arguments (strings,
+array items, nested object values and keys, 6 container levels) against three rules and returns
+`{ block: true, reason }`.
 
-| # | Catches |
-| - | ------- |
-| 1 | the relay host behind the original incidents |
-| 2 | the relay bucket label family (`routify-file-*`, proxy-less labels included) on any Aliyun OSS endpoint spelling, `.com` or `.io` |
-| 3 | an upload-target bucket caught taking a model-initiated `PUT` (label and OSS endpoint both required) |
-| 4 | the cloud metadata surface: the link-local address, one non-link-local vendor variant, and the GCP hostname |
+The local file tools (`read`, `grep`, `find`, `ls`, `edit`, `write`) are exempt since
+they cannot open a socket.
 
-The error text is written to end the retry loop, not just fail the call. The first block in a session
-carries full teaching guidance; repeats get a one-liner that keeps "Do NOT retry" without re-injecting
-~100 tokens into the context the fence protects.
+The plugin catches 3 things:
 
-The fence sits on Pi's tool pipeline and on outbound calls. A relay that genuinely replaces long outputs
-with signed links still leaves those links in the transcript, so what stops here is the repeat dial.
+| # | Catches | Source |
+| - | ------- | ------ |
+| 1 | the exact host in the original incidents | [upstream incident log](https://github.com/wtogami/qwen-block-proxy-artifacts/blob/master/README.md) |
+| 2 | near-variants of the URL: other hosts starting with the same `routify-file-` label, with or without the `-proxy-` part, on any Aliyun OSS domain (`.com` or `.io` ending). | [how upstream picked these shapes](https://github.com/wtogami/qwen-block-proxy-artifacts/blob/master/SURGERY.md) |
+| 3 | the `sanmaohe…` bucket, caught attempting an upload (a `PUT`) from the model. matched as an Aliyun OSS hostname | [Cohere report](https://cohere.com/blog/concerning-behaviour-popular-open-weight-ai-model), [packet capture notes](https://github.com/wtogami/qwen-block-proxy-artifacts/blob/master/COHERE-2026-10-26.md) |
+
+Upstream also ships a fourth rule for the link-local cloud metadata address,
+the place a cloud host serves its own temporary credentials
+([Cohere report](https://cohere.com/blog/concerning-behaviour-popular-open-weight-ai-model),
+[AWS instance metadata](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-metadata.html)).
+I've chosen to disable it for this port. To fence it anyway, run with `PI_BLOCK_PROXY_METADATA=1` set in the
+environment; the rule list in `extensions/block-proxy-artifacts.ts` stays untouched, so an update does not
+undo your choice.
+
+This aims to stop offending tool call as well as the resulting time-consuming retry loops. The first block
+carries full teaching guidance. Repeat attemps result in a one-liner that keeps "Do NOT retry" without re-injecting
+the full guidance into the context again.
 
 ## Install
 
@@ -67,38 +79,50 @@ through jiti, and the only import is a type.
 An extension that fails to load fails quietly, so prove the fence is up in a new Pi session:
 
 ```bash
-pi -p 'Use the bash tool to run exactly this command, then tell me in one line what happened: curl -sS -m 3 http://169.254.169.254/latest/meta-data/'
+pi -p 'Use the bash tool to run exactly this command, then tell me in one line what happened: curl -sS -m 5 https://routify-file-proxy-sg.oss-ap-southeast-1.aliyuncs.com/'
 ```
 
 The call should come back blocked by the policy, with no `403` and no timeout.
 
 ## Limitations
 
-- Substring matching over- and under-fires by choice. It over-fires on calls that merely mention an
-  indicator, so a `write` or `edit` whose content contains a live URL is blocked, and so is a `grep` for
-  one. This README is the single file in the repo carrying a literal indicator URL, so changing it from
-  a fenced session means `git` or an external editor; a test keeps the sources and tests literal-free.
-  The rules stay host-anchored, which is why a bare `routify` mention, an unrelated OSS bucket and a
-  neighbor of the metadata address all pass.
-- Redirects, DNS aliases and URL encodings get through. It is a guardrail against confabulation, not a
-  network perimeter.
-- Each block ends a same-URL retry loop in one step. The next fabrication still arrives whenever the
-  model wants another long page.
+- Any network-capable tool call containing a blocked URL is blocked, even when it is not the URL being
+  dialed. For example, a `bash` call containing the URL. That is deliberate: those tools could
+  connect regardless. The local file tools listed under [What it does](#what-it-does) are exempt, so you
+  can read and edit any file, even one containing a blocked URL. And the rules look for the blocked
+  hostname itself, not any single part of it, so a call mentioning the word `routify` (from the Aliyun URLs)
+  or connecting to an ordinary Aliyun storage bucket with a different name is not blocked.
+- Redirects, DNS aliases and URL encodings get through since this isn't a network level block.
+- The block message tells the model not to retry, so it ends the retry loop for a hallucinated Aliyun
+  URL in one step. It does not stop the model from inventing a new one the next time it wants to fetch
+  a long page.
 - Nesting deeper than 6 argument levels is not scanned.
-- Sinkholing the indicator hosts in `/etc/hosts` is not included here; see Defense in depth.
+- This extension only blocks calls made through Pi. For ways to block these hosts more thoroughly, see
+  [Defense in depth](#defense-in-depth).
 
 ## Defense in depth
 
-This fence sits in Pi's tool layer, which is a good place to catch a confabulated dial and a thin place
-to enforce anything else. A program Pi runs can reach a host on its own, a rule set can lag a new shape,
-and the model keeps inventing. Egress controls do not care what the model invented, so run both.
+While this does resolve the issue within Pi, it only does so by monitoring and blocking relevant tool calls. 
+Deeper blocking is worthwhile here, especially if you use other agents besides Pi.
+As such, this plugin is best paired with an agent sandbox or a network level host block.
 
-### nono
+The options below block hosts at the network level, no matter how a program tried to reach them. Use both together.
 
-[nono](https://github.com/nolabs-ai/nono) runs Pi inside an OS-level sandbox: Landlock on Linux, Seatbelt
-on macOS, enforced before Pi starts and outside Pi's approval and extension systems. Its network layer
-filters by domain through a local proxy, so it covers whatever the process actually dials instead of what
-a tool argument said it would.
+How the layers stack up:
+
+| Layer | Catches | Lets through |
+| ----- | ------- | ------------ |
+| this extension | every network-capable tool call Pi makes, MCP and nested calls included, with an error the model reads | work outside Pi's tool pipeline, and the local file tools |
+| nono domain rules | every connection from the sandboxed process tree | content a permitted host returns |
+| hosts file or resolver | the hosts you list, or a wider pattern where the resolver supports one | any host you did not list |
+
+<details>
+<summary><h3>nono</h3></summary>
+
+[nono](https://github.com/nolabs-ai/nono) runs agents inside an OS-level sandbox (Landlock on Linux, Seatbelt
+on macOS), enforced before your agents start and operate outside their approval and extension systems. Its network
+layer filters by domain through a local proxy, so it covers the actual network communication instead of the tool call
+arguments.
 
 ```bash
 nono run --profile pi --allow-domain github.com --allow-domain docs.python.org -- pi
@@ -112,42 +136,26 @@ the flags are optional:
 { "network": { "allow_domain": ["github.com", "docs.python.org"] } }
 ```
 
-Domain filtering is the useful property here: an invented relay host is not on the list, so it dies at the
-socket and the trace identifiers stay home. nono's credential routes also keep API keys out of the
-sandboxed process, which is the exposure the metadata half of this fence is about.
+Filtering by domain is the useful property here: a made-up Aliyun URL is not a domain you allowed, so
+the connection fails before anything is sent, and the IDs built into the URL never leave your machine. 
 
-### Other agent sandboxes
+**Docs:** [nono.sh/docs](https://nono.sh/docs)
 
-Claude Code has a built-in sandbox with a domain allowlist, `sandbox.network.allowedDomains`, backed by
-Seatbelt on macOS and by bubblewrap plus socat on Linux and WSL2. Same boundary, different product, which
-is a reasonable signal that this bug class is not specific to one agent.
+</details>
 
-### Bare OS mechanisms
+<details>
+<summary><h3>The network layer</h3></summary>
 
-For one risky command instead of a whole session, take away the route:
+Pointing the fake hostnames at a dead address in `/etc/hosts`, or blocking them in a resolver such as
+Pi-hole or AdGuard, covers programs that never go through Pi. `/etc/hosts` needs one entry per hostname,
+while resolvers take wildcards and regex, so you can write your own broader patterns instead of mirroring
+the rules table. Either way, anything you did not put on the list gets through, so this layer only helps
+as much as the list you maintain. An upstream proxy with an allowlist is the same idea with wider reach,
+and it is what nono chains into with `--upstream-proxy`.
 
-```bash
-bwrap --ro-bind / / --dev /dev --unshare-net -- curl -sS https://example.com
-firejail --net=none -- nmap -sn 10.0.0.0/24
-```
+**Docs:** [Pi-hole](https://docs.pi-hole.net/) · [AdGuard Home](https://adguard.com/adguard-home/overview.html)
 
-The first one was checked on this machine: `curl` inside `--unshare-net` fails to connect (exit 7). Both
-are absolute, which is also the cost, since `git` and `npm` need the network. macOS has the equivalent in
-Seatbelt profiles through `sandbox-exec`.
-
-### The network layer
-
-Sinkholing the indicator hosts in `/etc/hosts`, or blocking them in a resolver such as Pi-hole or AdGuard,
-covers processes that never went through Pi. It stops the shapes you listed and nothing else, so it is a
-backstop for the rules table rather than a policy of its own. An upstream proxy with an allowlist is the
-same idea with wider reach, and it is what nono chains into with `--upstream-proxy`.
-
-| Layer | Catches | Lets through |
-| ----- | ------- | ------------ |
-| this extension | every tool call Pi makes, MCP and nested calls included, with an error the model reads | work outside Pi's tool pipeline |
-| nono domain rules | every connection from the sandboxed process tree | content a permitted host returns |
-| namespace isolation | everything, by removing the route | anything that needs the network |
-| hosts file or resolver | the indicators you listed | any new shape |
+</details>
 
 ## Development
 
