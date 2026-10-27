@@ -1,7 +1,7 @@
 {
   "name": "pi-block-proxy-artifacts",
   "version": "0.1.0",
-  "description": "Pi extension that hard-blocks hallucinated file-proxy artifact URLs and the cloud metadata surface before any tool dials out",
+  "description": "Pi extension that hard-blocks hallucinated Aliyun OSS file-proxy artifact URLs before a network-capable tool dials out",
   "keywords": [
     "pi-package",
     "pi",
@@ -23,7 +23,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
+    "test": "node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

