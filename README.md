@@ -58,7 +58,13 @@ the full guidance into the context again.
 ## Install
 
 ```bash
-pi install git:github.com/enncoded/pi-block-proxy-artifacts
+pi install npm:pi-qwen-block-proxy-artifacts
+```
+
+Or install straight from the repository, which tracks `main` instead of a published version:
+
+```bash
+pi install git:github.com/enncoded/pi-qwen-block-proxy-artifacts
 ```
 
 Or copy the single file into your user extensions directory and let Pi discover it, which covers every
@@ -67,7 +73,7 @@ project:
 ```bash
 mkdir -p ~/.pi/agent/extensions
 curl -o ~/.pi/agent/extensions/block-proxy-artifacts.ts \
-  https://raw.githubusercontent.com/enncoded/pi-block-proxy-artifacts/main/extensions/block-proxy-artifacts.ts
+  https://raw.githubusercontent.com/enncoded/pi-qwen-block-proxy-artifacts/main/extensions/block-proxy-artifacts.ts
 ```
 
 The `curl` form needs a public repo, or a token in the URL. `pi install` uses your own git credentials,
