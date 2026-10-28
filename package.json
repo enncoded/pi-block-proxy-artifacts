@@ -1,6 +1,6 @@
 {
-  "name": "pi-block-proxy-artifacts",
-  "version": "0.1.0",
+  "name": "pi-qwen-block-proxy-artifacts",
+  "version": "0.1.1",
   "description": "Pi extension that hard-blocks hallucinated Aliyun OSS file-proxy artifact URLs before a network-capable tool dials out",
   "keywords": [
     "pi-package",
@@ -16,11 +16,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/enncoded/pi-block-proxy-artifacts.git"
+    "url": "git+https://github.com/enncoded/pi-qwen-block-proxy-artifacts.git"
   },
-  "homepage": "https://github.com/enncoded/pi-block-proxy-artifacts#readme",
+  "homepage": "https://github.com/enncoded/pi-qwen-block-proxy-artifacts#readme",
   "bugs": {
-    "url": "https://github.com/enncoded/pi-block-proxy-artifacts/issues"
+    "url": "https://github.com/enncoded/pi-qwen-block-proxy-artifacts/issues"
   },
   "pi": {
     "extensions": ["./extensions/block-proxy-artifacts.ts"]
